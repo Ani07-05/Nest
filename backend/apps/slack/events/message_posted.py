@@ -37,13 +37,14 @@ class MessagePosted(EventBase):
 
         # Update parent message if this is a thread reply
         if event.get("thread_ts"):
-            try:
-                Message.objects.filter(
-                    slack_message_id=event.get("thread_ts"),
-                    conversation__slack_channel_id=event.get("channel"),
-                ).update(has_replies=True)
-            except Message.DoesNotExist:
-                logger.info("Parent message not found for thread reply.")
+            updated = Message.objects.filter(
+                slack_message_id=event.get("thread_ts"),
+                conversation__slack_channel_id=event.get("channel"),
+            ).update(has_replies=True)
+            if not updated:
+                logger.info(
+                    "Parent message for thread_ts %s not found in thread reply."
+            )
             return
 
         channel_id = event.get("channel")
