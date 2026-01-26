@@ -43,8 +43,9 @@ class MessagePosted(EventBase):
             ).update(has_replies=True)
             if not updated:
                 logger.info(
-                    "Parent message for thread_ts %s not found in thread reply."
-            )
+                    "Parent message for thread_ts %s not found in thread reply.",
+                    event.get("thread_ts"),
+                )
             return
 
         channel_id = event.get("channel")
@@ -60,12 +61,19 @@ class MessagePosted(EventBase):
             logger.info("Conversation not found or bot not enabled for channel: %s", channel_id)
             return
 
-        # Check if message has images - bypass question detector for image messages
-        image_files = [
-            f for f in event.get("files", []) if f.get("mimetype", "").startswith("image/")
-        ]
+        # Check if message has valid images - only bypass question detector for valid images
+        from apps.slack.services.image_extraction import (
+            extract_images_then_maybe_reply,
+            is_valid_image_file,
+        )
 
-        # For text-only messages, use question detector
+        image_files = [
+            f
+            for f in event.get("files", [])
+            if f.get("mimetype", "").startswith("image/") and is_valid_image_file(f)
+        ][:3]
+
+        # For text-only messages or messages without valid images, use question detector
         if not image_files and not self.question_detector.is_owasp_question(text):
             logger.info("Question detector rejected message")
             return
@@ -91,34 +99,18 @@ class MessagePosted(EventBase):
             save=True,
         )
 
-        # Handle messages with images
+        # Handle messages with valid images
         if image_files:
-            from apps.slack.services.image_extraction import (
-                extract_images_then_maybe_reply,
-                is_valid_image_file,
+            logger.info(
+                "Queueing image extraction for message %s with %s image(s)",
+                message.id,
+                len(image_files),
             )
-
-            # Validate and limit to 3 images
-            valid_images = [f for f in image_files if is_valid_image_file(f)][:3]
-
-            if valid_images:
-                logger.info(
-                    "Queueing image extraction for message %s with %s image(s)",
-                    message.id,
-                    len(valid_images),
-                )
-                django_rq.get_queue("ai").enqueue(
-                    extract_images_then_maybe_reply,
-                    message.id,
-                    valid_images,
-                )
-            else:
-                logger.info("No valid images, queueing normal AI reply for message %s", message.id)
-                django_rq.get_queue("ai").enqueue_in(
-                    timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
-                    generate_ai_reply_if_unanswered,
-                    message.id,
-                )
+            django_rq.get_queue("ai").enqueue(
+                extract_images_then_maybe_reply,
+                message.id,
+                image_files,
+            )
         else:
             logger.info("Queueing AI reply for message %s", message.id)
             django_rq.get_queue("ai").enqueue_in(
