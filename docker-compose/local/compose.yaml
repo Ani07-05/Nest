@@ -25,8 +25,8 @@ services:
       DJANGO_REDIS_HOST: ${DJANGO_REDIS_HOST:-nest-cache}
       DJANGO_REDIS_PASSWORD: ${DJANGO_REDIS_HOST:-nest-cache-password}
       # Disable Slack in backend - routes won't be registered
-      DJANGO_SLACK_BOT_TOKEN: "None"
-      DJANGO_SLACK_SIGNING_SECRET: "None"
+      DJANGO_SLACK_BOT_TOKEN: None
+      DJANGO_SLACK_SIGNING_SECRET: None
     networks:
       - nest-network
     ports:

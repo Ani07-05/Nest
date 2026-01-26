@@ -90,12 +90,12 @@ class Message(TimestampedModel):
         parts = [self.text] if self.text else []
 
         if extractions := self.raw_data.get("image_extractions", []):
-            for extraction in extractions:
-                if extraction.get("status") == "success" and extraction.get("extracted_text"):
-                    parts.append(
-                        f"\n[Image: {extraction.get('file_name', 'unnamed')}]\n"
-                        f"{extraction['extracted_text']}"
-                    )
+            parts.extend(
+                f"\n[Image: {extraction.get('file_name', 'unnamed')}]\n"
+                f"{extraction['extracted_text']}"
+                for extraction in extractions
+                if extraction.get("status") == "success" and extraction.get("extracted_text")
+            )
         return "\n\n".join(parts)
 
     @property

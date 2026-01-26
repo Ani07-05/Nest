@@ -27,13 +27,16 @@ def is_valid_image_file(file_data: dict) -> bool:
     size_bytes = file_data.get("size", 0)
 
     if mimetype not in SUPPORTED_IMAGE_TYPES:
-        logger.debug(f"Skipping non-image file: {mimetype}")
+        logger.debug("Skipping non-image file: %s", mimetype)
         return False
 
     size_mb = size_bytes / (1024 * 1024)
     if size_mb > MAX_IMAGE_SIZE_MB:
         logger.warning(
-            f"Image {file_data.get('id')} too large: {size_mb:.2f}MB (max: {MAX_IMAGE_SIZE_MB}MB)"
+            "Image %s too large: %.2fMB (max: %sMB)",
+            file_data.get("id"),
+            size_mb,
+            MAX_IMAGE_SIZE_MB,
         )
         return False
 
@@ -46,17 +49,19 @@ def download_slack_image(url: str, bot_token: str) -> bytes | None:
         headers = {"Authorization": f"Bearer {bot_token}"}
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.content
     except RequestException:
-        logger.exception(f"Failed to download image from {url}")
+        logger.exception("Failed to download image from %s", url)
         return None
+    else:
+        return response.content
 
 
-def extract_text_from_image(image_data: bytes, file_name: str) -> str:
+def extract_text_from_image(image_data: bytes) -> str:
     """Extract text from image using GPT-4o."""
     api_key = settings.OPEN_AI_SECRET_KEY
     if not api_key:
-        raise ValueError("DJANGO_OPEN_AI_SECRET_KEY not set")
+        msg = "DJANGO_OPEN_AI_SECRET_KEY not set"
+        raise ValueError(msg)
 
     client = openai.OpenAI(api_key=api_key)
     base64_image = base64.b64encode(image_data).decode("utf-8")
@@ -70,7 +75,8 @@ def extract_text_from_image(image_data: bytes, file_name: str) -> str:
                     {
                         "type": "text",
                         "text": (
-                            "Extract all text from this image. If there's code, preserve formatting. "
+                            "Extract all text from this image. "
+                            "If there's code, preserve formatting. "
                             "If it's a screenshot of an error, include the full error message. "
                             "If it's a diagram or chart, describe the key information. "
                             "Return only the extracted text without any preamble."
@@ -98,13 +104,13 @@ def extract_images_then_maybe_reply(message_id: int, image_files: list[dict]) ->
     try:
         message = Message.objects.get(pk=message_id)
     except Message.DoesNotExist:
-        logger.error(f"Message {message_id} not found for image extraction")
+        logger.exception("Message %s not found for image extraction", message_id)
         return
 
-    logger.info(f"Extracting text from {len(image_files)} images for message {message_id}")
+    logger.info("Extracting text from %s images for message %s", len(image_files), message_id)
 
     bot_token = settings.SLACK_BOT_TOKEN
-    if not bot_token or bot_token == "None":
+    if not bot_token or bot_token == "None":  # noqa: S105
         logger.error("No bot token available")
         django_rq.get_queue("ai").enqueue_in(
             timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
@@ -128,13 +134,17 @@ def extract_images_then_maybe_reply(message_id: int, image_files: list[dict]) ->
         try:
             image_url = file_data.get("url_private_download") or file_data.get("url_private")
             if not image_url:
-                raise ValueError("No image URL found in file data")
+                extraction_result.update({"status": "failed", "error": "No image URL found"})
+                extractions.append(extraction_result)
+                continue
 
             image_data = download_slack_image(image_url, bot_token)
             if not image_data:
-                raise ValueError("Failed to download image")
+                extraction_result.update({"status": "failed", "error": "Failed to download image"})
+                extractions.append(extraction_result)
+                continue
 
-            extracted_text = extract_text_from_image(image_data, file_name)
+            extracted_text = extract_text_from_image(image_data)
 
             extraction_result.update(
                 {
@@ -144,15 +154,17 @@ def extract_images_then_maybe_reply(message_id: int, image_files: list[dict]) ->
                 }
             )
 
-            logger.info(f"Successfully extracted text from {file_name} ({len(extracted_text)} chars)")
+            logger.info(
+                "Successfully extracted text from %s (%s chars)", file_name, len(extracted_text)
+            )
 
-        except openai.OpenAIError as e:
-            logger.error(f"OpenAI API error for {file_name}: {e!s}")
-            extraction_result.update({"status": "failed", "error": f"OpenAI API error: {e!s}"})
+        except openai.OpenAIError:
+            logger.exception("OpenAI API error for %s", file_name)
+            extraction_result.update({"status": "failed", "error": "OpenAI API error"})
 
-        except Exception as e:
-            logger.exception(f"Failed to extract text from {file_name}")
-            extraction_result.update({"status": "failed", "error": str(e)})
+        except Exception:
+            logger.exception("Failed to extract text from %s", file_name)
+            extraction_result.update({"status": "failed", "error": "Extraction failed"})
 
         extractions.append(extraction_result)
 
@@ -162,7 +174,7 @@ def extract_images_then_maybe_reply(message_id: int, image_files: list[dict]) ->
     message.save(update_fields=["raw_data"])
 
     success_count = sum(1 for e in extractions if e.get("status") == "success")
-    logger.info(f"Completed image extraction: {success_count}/{len(extractions)} successful")
+    logger.info("Completed image extraction: %s/%s successful", success_count, len(extractions))
 
     django_rq.get_queue("ai").enqueue_in(
         timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),

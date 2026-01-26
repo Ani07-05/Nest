@@ -32,7 +32,7 @@ class MessagePosted(EventBase):
 
         # Allow file_share subtype (messages with images), ignore others
         if event.get("subtype") and event.get("subtype") != "file_share":
-            logger.info(f"Ignoring message with subtype: {event.get('subtype')}")
+            logger.info("Ignoring message with subtype: %s", event.get("subtype"))
             return
 
         # Update parent message if this is a thread reply
@@ -56,7 +56,7 @@ class MessagePosted(EventBase):
                 is_nest_bot_assistant_enabled=True,
             )
         except Conversation.DoesNotExist:
-            logger.info(f"Conversation not found or bot not enabled for channel: {channel_id}")
+            logger.info("Conversation not found or bot not enabled for channel: %s", channel_id)
             return
 
         # Check if message has images - bypass question detector for image messages
@@ -81,7 +81,7 @@ class MessagePosted(EventBase):
                 conversation.workspace,
                 save=True,
             )
-            logger.info(f"Created new member for user_id {user_id}")
+            logger.info("Created new member for user_id %s", user_id)
 
         message = Message.update_data(
             data=event,
@@ -102,8 +102,9 @@ class MessagePosted(EventBase):
 
             if valid_images:
                 logger.info(
-                    f"Queueing image extraction for message {message.id} "
-                    f"with {len(valid_images)} image(s)"
+                    "Queueing image extraction for message %s with %s image(s)",
+                    message.id,
+                    len(valid_images),
                 )
                 django_rq.get_queue("ai").enqueue(
                     extract_images_then_maybe_reply,
@@ -111,16 +112,14 @@ class MessagePosted(EventBase):
                     valid_images,
                 )
             else:
-                logger.info(
-                    f"No valid images, queueing normal AI reply for message {message.id}"
-                )
+                logger.info("No valid images, queueing normal AI reply for message %s", message.id)
                 django_rq.get_queue("ai").enqueue_in(
                     timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
                     generate_ai_reply_if_unanswered,
                     message.id,
                 )
         else:
-            logger.info(f"Queueing AI reply for message {message.id}")
+            logger.info("Queueing AI reply for message %s", message.id)
             django_rq.get_queue("ai").enqueue_in(
                 timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
                 generate_ai_reply_if_unanswered,
