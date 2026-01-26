@@ -25,10 +25,17 @@ class MessagePosted(EventBase):
 
     def handle_event(self, event, client):
         """Handle an incoming message event."""
-        if event.get("subtype") or event.get("bot_id"):
-            logger.info("Ignored message due to subtype, bot_id, or thread_ts.")
+        # Ignore bot messages
+        if event.get("bot_id"):
+            logger.info("Ignoring bot message.")
             return
 
+        # Allow file_share subtype (messages with images), ignore others
+        if event.get("subtype") and event.get("subtype") != "file_share":
+            logger.info(f"Ignoring message with subtype: {event.get('subtype')}")
+            return
+
+        # Update parent message if this is a thread reply
         if event.get("thread_ts"):
             try:
                 Message.objects.filter(
@@ -36,7 +43,7 @@ class MessagePosted(EventBase):
                     conversation__slack_channel_id=event.get("channel"),
                 ).update(has_replies=True)
             except Message.DoesNotExist:
-                logger.warning("Thread message not found.")
+                logger.info("Parent message not found for thread reply.")
             return
 
         channel_id = event.get("channel")
@@ -49,25 +56,73 @@ class MessagePosted(EventBase):
                 is_nest_bot_assistant_enabled=True,
             )
         except Conversation.DoesNotExist:
-            logger.warning("Conversation not found or assistant not enabled.")
+            logger.info(f"Conversation not found or bot not enabled for channel: {channel_id}")
             return
 
-        if not self.question_detector.is_owasp_question(text):
+        # Check if message has images - bypass question detector for image messages
+        image_files = [
+            f for f in event.get("files", []) if f.get("mimetype", "").startswith("image/")
+        ]
+
+        # For text-only messages, use question detector
+        if not image_files and not self.question_detector.is_owasp_question(text):
+            logger.info("Question detector rejected message")
             return
 
         try:
-            author = Member.objects.get(slack_user_id=user_id, workspace=conversation.workspace)
+            author = Member.objects.get(
+                slack_user_id=user_id,
+                workspace=conversation.workspace,
+            )
         except Member.DoesNotExist:
             user_info = client.users_info(user=user_id)
-            author = Member.update_data(user_info["user"], conversation.workspace, save=True)
-            logger.info("Created new member")
+            author = Member.update_data(
+                user_info["user"],
+                conversation.workspace,
+                save=True,
+            )
+            logger.info(f"Created new member for user_id {user_id}")
 
         message = Message.update_data(
-            data=event, conversation=conversation, author=author, save=True
+            data=event,
+            conversation=conversation,
+            author=author,
+            save=True,
         )
 
-        django_rq.get_queue("ai").enqueue_in(
-            timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
-            generate_ai_reply_if_unanswered,
-            message.id,
-        )
+        # Handle messages with images
+        if image_files:
+            from apps.slack.services.image_extraction import (
+                extract_images_then_maybe_reply,
+                is_valid_image_file,
+            )
+
+            # Validate and limit to 3 images
+            valid_images = [f for f in image_files if is_valid_image_file(f)][:3]
+
+            if valid_images:
+                logger.info(
+                    f"Queueing image extraction for message {message.id} "
+                    f"with {len(valid_images)} image(s)"
+                )
+                django_rq.get_queue("ai").enqueue(
+                    extract_images_then_maybe_reply,
+                    message.id,
+                    valid_images,
+                )
+            else:
+                logger.info(
+                    f"No valid images, queueing normal AI reply for message {message.id}"
+                )
+                django_rq.get_queue("ai").enqueue_in(
+                    timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
+                    generate_ai_reply_if_unanswered,
+                    message.id,
+                )
+        else:
+            logger.info(f"Queueing AI reply for message {message.id}")
+            django_rq.get_queue("ai").enqueue_in(
+                timedelta(minutes=QUEUE_RESPONSE_TIME_MINUTES),
+                generate_ai_reply_if_unanswered,
+                message.id,
+            )
